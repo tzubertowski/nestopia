@@ -148,6 +148,28 @@ namespace Nes
 					if (altered)
 						*altered = true;
 
+#ifndef __EXCEPTIONS
+					// No exception handling - simplified version for MIPS build
+					Nes::Core::Stream::In stream( &stdStream );
+
+					if (ulong length = stream.Length())
+					{
+						for (const LoadBlock* NST_RESTRICT it=loadBlock, *const end=loadBlock+loadBlockCount; it != end; ++it)
+						{
+							if (const dword size = NST_MIN(length,it->size))
+							{
+								stream.Read( it->data, size );
+								length -= size;
+							}
+						}
+					}
+					else
+					{
+						return RESULT_ERR_INVALID_PARAM;
+					}
+
+					return RESULT_OK;
+#else
 					try
 					{
                   Nes::Core::Stream::In stream( &stdStream );
@@ -182,6 +204,7 @@ namespace Nes
 					}
 
 					return RESULT_OK;
+#endif
 				}
 
 				Result SetPatchContent(std::istream& stream) throw()

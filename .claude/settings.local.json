@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./buildcoresworking.sh:*)",
+      "Bash(git stash push:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(git stash:*)",
+      "Bash(rm:*)",
+      "Bash(/app/buildcoresworking.sh:*)",
+      "Bash(git checkout:*)",
+      "Bash(grep:*)",
+      "Bash(make:*)",
+      "Bash(ls:*)",
+      "Bash(/opt/mips32-mti-elf/2019.09-03-2/bin/mips-mti-elf-nm:*)",
+      "Bash(find:*)"
+    ],
+    "deny": []
+  }
+}

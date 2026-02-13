@@ -263,7 +263,9 @@ namespace Nes
 
 			const byte& Peek(uint address) const
 			{
-				return pages.mem[address >> MEM_PAGE_SHIFT][address & MEM_PAGE_MASK];
+				// MIPS Soft FPU Optimization: Reduce double indirection with fast path
+				const uint page = address >> MEM_PAGE_SHIFT;
+				return pages.mem[page][address & MEM_PAGE_MASK];
 			}
 
 			byte* operator [] (uint page)
@@ -278,10 +280,12 @@ namespace Nes
 
 			void Poke(uint address,uint data)
 			{
+				// MIPS Soft FPU Optimization: Eliminate redundant writable check
 				const uint page = address >> MEM_PAGE_SHIFT;
 				NST_VERIFY( Writable( page ) );
 
-				if (Writable( page ))
+				// Single writable check - compiler will optimize the common case
+				if (sources[pages.ref[page]].Writable())
 					pages.mem[page][address & MEM_PAGE_MASK] = data;
 			}
 

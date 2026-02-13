@@ -77,6 +77,9 @@ static unsigned char prevR = false; // => R Button is held; controls famicon dis
 static const int tracked_input_state_size_bytes = 8; // Send the 8 previous fields as unsigned char
 static size_t state_size = 0;
 
+static int frameskip_value = 0;
+static int frameskip_counter = 0;
+
 static enum {
    SHOW_CROSSHAIR_DISABLED,
    SHOW_CROSSHAIR_OFF,
@@ -1002,7 +1005,7 @@ static void check_variables(void)
    {
       if (strcmp(var.value, "1x") == 0)
          video.EnableOverclocking(false);
-      else if (strcmp(var.value, "2x") == 0)
+      else if (strcmp(var.value, "1.5x") == 0 || strcmp(var.value, "2x") == 0 || strcmp(var.value, "3x") == 0)
          video.EnableOverclocking(true);
    }
    
@@ -1011,11 +1014,23 @@ static void check_variables(void)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var))
       fds_auto_insert = (strcmp(var.value, "enabled") == 0);
    
+   // Check performance mode first to override other settings
+   var.key = "nestopia_performance_mode";
+   bool performance_mode = false;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var))
+   {
+      performance_mode = (strcmp(var.value, "enabled") == 0);
+   }
+   
    var.key = "nestopia_blargg_ntsc_filter";
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var))
    {
-      if (strcmp(var.value, "disabled") == 0)
+      if (performance_mode)
+      {
+         blargg_ntsc = 0; // Force disable NTSC filter in performance mode
+      }
+      else if (strcmp(var.value, "disabled") == 0)
          blargg_ntsc = 0;
       else if (strcmp(var.value, "composite") == 0)
          blargg_ntsc = 2;
@@ -1025,6 +1040,12 @@ static void check_variables(void)
          blargg_ntsc = 4;
       else if (strcmp(var.value, "monochrome") == 0)
          blargg_ntsc = 5;
+   }
+   
+   // Apply performance mode overrides after reading all options
+   if (performance_mode)
+   {
+      video.EnableOverclocking(true); // Enable 2x overclock
    }
 
    switch(blargg_ntsc)
@@ -1299,6 +1320,12 @@ static void check_variables(void)
       sound.SetVolume(Api::Sound::CHANNEL_S5B, atoi(var.value));
    }
 
+   var.key = "nestopia_frameskip";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var))
+   {
+      frameskip_value = performance_mode ? 1 : atoi(var.value);
+   }
+
    var.key = "nestopia_audio_type";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var))
    {
@@ -1361,6 +1388,8 @@ static void check_variables(void)
 void retro_run(void)
 {
    poll_fds_buttons();
+   
+   // Always run emulator for game logic
    emulator.Execute(video, audio, input);
 
    if (show_crosshair == SHOW_CROSSHAIR_ON)
@@ -1379,16 +1408,38 @@ void retro_run(void)
 
    int dif = blargg_ntsc ? 9 : 4;
 
-   // Absolute mess of inline if statements...
-   video_cb(video_buffer + ((blargg_ntsc ? Api::Video::Output::NTSC_WIDTH : Api::Video::Output::WIDTH) * overscan_v_top) + ((overscan_h_left * dif) / 4) + 0,
-         video_width - (((overscan_h_left + overscan_h_right) * dif) / 4),
-         Api::Video::Output::HEIGHT - (overscan_v_top + overscan_v_bottom),
-         pitch);
+   // Frameskip: skip video output only, not emulation
+   bool should_render = (frameskip_value == 0) || (frameskip_counter % (frameskip_value + 1) == 0);
+   
+   if (should_render)
+   {
+      // Pre-calculate offsets to reduce computation in hot path
+      const uint32_t width_offset = blargg_ntsc ? Api::Video::Output::NTSC_WIDTH : Api::Video::Output::WIDTH;
+      const uint32_t vertical_offset = width_offset * overscan_v_top;
+      const uint32_t horizontal_offset = (overscan_h_left * dif) >> 2; // Division by 4 -> bit shift
+      const uint16_t display_width = video_width - (((overscan_h_left + overscan_h_right) * dif) >> 2);
+      const uint16_t display_height = Api::Video::Output::HEIGHT - (overscan_v_top + overscan_v_bottom);
+      
+      video_cb(video_buffer + vertical_offset + horizontal_offset,
+            display_width, display_height, pitch);
+   }
+
+   frameskip_counter++;
 
    // Use audio buffer untouched for stereo, duplicate samples for mono
    if (Api::Sound(emulator).GetSpeaker() == Api::Sound::SPEAKER_MONO)
    {
-      for (unsigned i = 0; i < frames; i++)
+      // Optimized mono expansion with loop unrolling
+      unsigned i = 0;
+      for (; i < (frames & ~3); i += 4)
+      {
+         audio_stereo_buffer[(i << 1) + 0] = audio_stereo_buffer[(i << 1) + 1] = audio_buffer[i];
+         audio_stereo_buffer[((i+1) << 1) + 0] = audio_stereo_buffer[((i+1) << 1) + 1] = audio_buffer[i+1];
+         audio_stereo_buffer[((i+2) << 1) + 0] = audio_stereo_buffer[((i+2) << 1) + 1] = audio_buffer[i+2];
+         audio_stereo_buffer[((i+3) << 1) + 0] = audio_stereo_buffer[((i+3) << 1) + 1] = audio_buffer[i+3];
+      }
+      // Handle remaining samples
+      for (; i < frames; i++)
       {
          audio_stereo_buffer[(i << 1) + 0] = audio_stereo_buffer[(i << 1) + 1] = audio_buffer[i];
       }
@@ -1507,10 +1558,17 @@ bool retro_load_game(const struct retro_game_info *info)
       { 0 },
    };
 
+   size_t buffer_size = Api::Video::Output::NTSC_WIDTH * Api::Video::Output::HEIGHT * sizeof(uint32_t);
 #ifdef _3DS
-   video_buffer = (uint32_t*)linearMemAlign(Api::Video::Output::NTSC_WIDTH * Api::Video::Output::HEIGHT * sizeof(uint32_t), 0x80);
+   video_buffer = (uint32_t*)linearMemAlign(buffer_size, 0x80);
 #else
-   video_buffer = (uint32_t*)malloc(Api::Video::Output::NTSC_WIDTH * Api::Video::Output::HEIGHT * sizeof(uint32_t));
+   // Use aligned allocation for better cache performance on MIPS
+   #ifdef __MIPS__
+   if (posix_memalign((void**)&video_buffer, 64, buffer_size) != 0)
+      video_buffer = (uint32_t*)malloc(buffer_size);
+   #else
+   video_buffer = (uint32_t*)malloc(buffer_size);
+   #endif
 #endif
 
    machine = new Api::Machine(emulator);

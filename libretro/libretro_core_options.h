@@ -681,12 +681,14 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "nestopia_overclock",
       "CPU Speed (Overclock)",
       NULL,
-      "Overclock the emulated CPU.",
+      "Overclock the emulated CPU. Higher speeds may cause timing issues in some games.",
       NULL,
       "hacks",
       {
-         { "1x", NULL },
-         { "2x", NULL },
+         { "1x", "Normal" },
+         { "1.5x", "150%" },
+         { "2x", "200%" },
+         { "3x", "300%" },
          { NULL, NULL },
       },
       "1x"
@@ -705,6 +707,34 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { NULL, NULL },
       },
       "0x00"
+   },
+   {
+      "nestopia_frameskip",
+      "Frameskip",
+      NULL,
+      "Skip frames to improve performance. 0 = no frameskip, 1 = render every other frame.",
+      NULL,
+      "hacks",
+      {
+         { "0", "Disabled" },
+         { "1", "Skip 1 Frame" },
+         { NULL, NULL },
+      },
+      "0"
+   },
+   {
+      "nestopia_performance_mode",
+      "Performance Mode",
+      NULL,
+      "Optimizes settings for low-end hardware like SF2000. Disables NTSC filter and enables frameskip.",
+      NULL,
+      "hacks",
+      {
+         { "disabled", "Disabled" },
+         { "enabled", "Enabled" },
+         { NULL, NULL },
+      },
+      "disabled"
    },
    { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
 };

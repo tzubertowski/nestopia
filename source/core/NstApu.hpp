@@ -297,6 +297,7 @@ namespace Nes
 			NES_DECL_PEEK( 40xx );
 
 			NST_NO_INLINE Channel::Sample GetSample();
+			NST_NO_INLINE void InitNonLinearTables(); // MIPS Soft FPU optimization
 
 			void NST_FASTCALL SyncOn    (Cycle);
 			void NST_FASTCALL SyncOnExt (Cycle);

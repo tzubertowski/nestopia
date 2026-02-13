@@ -185,7 +185,7 @@ namespace Nes
 				Result result = ReadHeader( setup, header, 16 );
 
 				if (NES_FAILED(result))
-					throw RESULT_ERR_CORRUPT_FILE;
+					throw result;
 
 				Log log;
 

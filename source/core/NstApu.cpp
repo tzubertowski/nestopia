@@ -1609,7 +1609,15 @@ namespace Nes
 					while (timer < 0);
 
 					NST_VERIFY( !envelope.Volume() || sum <= 0xFFFFFFFF / envelope.Volume() + rate/2 );
-					amp = (sum * envelope.Volume() + rate/2) / rate;
+					// MIPS Soft FPU Optimization: Replace division with bit shift where possible
+					if ((rate & (rate - 1)) == 0) {
+						// Rate is power of 2, use fast bit shift
+						const uint shift = 31 - __builtin_clz(rate);
+						amp = (sum * envelope.Volume() + (1U << (shift - 1))) >> shift;
+					} else {
+						// Fallback to division for non-power-of-2 rates
+						amp = (sum * envelope.Volume() + rate/2) / rate;
+					}
 				}
 			}
 			else
@@ -1845,7 +1853,15 @@ namespace Nes
 					while (timer < 0);
 
 					NST_VERIFY( !outputVolume || sum <= 0xFFFFFFFF / outputVolume + rate/2 );
-					amp = (sum * outputVolume + rate/2) / rate * 3;
+					// MIPS Soft FPU Optimization: Replace division with bit shift where possible
+					if ((rate & (rate - 1)) == 0) {
+						// Rate is power of 2, use fast bit shift
+						const uint shift = 31 - __builtin_clz(rate);
+						amp = ((sum * outputVolume + (1U << (shift - 1))) >> shift) * 3;
+					} else {
+						// Fallback to division for non-power-of-2 rates
+						amp = (sum * outputVolume + rate/2) / rate * 3;
+					}
 				}
 			}
 			/*else if (amp < Channel::OUTPUT_DECAY)
@@ -2055,7 +2071,15 @@ namespace Nes
 					while (timer < 0);
 
 					NST_VERIFY( !envelope.Volume() || sum <= 0xFFFFFFFF / envelope.Volume() + rate/2 );
-					return (sum * envelope.Volume() + rate/2) / rate * 2;
+					// MIPS Soft FPU Optimization: Replace division with bit shift where possible
+					if ((rate & (rate - 1)) == 0) {
+						// Rate is power of 2, use fast bit shift
+						const uint shift = 31 - __builtin_clz(rate);
+						return ((sum * envelope.Volume() + (1U << (shift - 1))) >> shift) * 2;
+					} else {
+						// Fallback to division for non-power-of-2 rates
+						return (sum * envelope.Volume() + rate/2) / rate * 2;
+					}
 				}
 			}
 			else while (timer < 0)
@@ -2552,17 +2576,77 @@ namespace Nes
 			cycles.frameIrqRepeat = repeat;
 		}
 
+		// MIPS Soft FPU Optimization: Precomputed lookup tables for non-linear mixing
+		// These replace expensive division operations in the 44kHz audio hot path
+		static const dword NLN_SQ_LOOKUP_SIZE = 512;
+		static const dword NLN_TND_LOOKUP_SIZE = 512;
+		static dword nln_sq_lookup[NLN_SQ_LOOKUP_SIZE];
+		static dword nln_tnd_lookup[NLN_TND_LOOKUP_SIZE];
+		static bool nln_tables_initialized = false;
+
+		NST_NO_INLINE void Apu::InitNonLinearTables()
+		{
+			if (nln_tables_initialized) return;
+			
+			// Pre-compute square wave non-linear mixing table
+			for (dword i = 0; i < NLN_SQ_LOOKUP_SIZE; ++i) {
+				if (i == 0) {
+					nln_sq_lookup[i] = 0;
+				} else {
+					nln_sq_lookup[i] = NLN_SQ_0 / (NLN_SQ_1 / i + NLN_SQ_2);
+				}
+			}
+			
+			// Pre-compute triangle/noise/DMC non-linear mixing table  
+			for (dword i = 0; i < NLN_TND_LOOKUP_SIZE; ++i) {
+				if (i == 0) {
+					nln_tnd_lookup[i] = 0;
+				} else {
+					nln_tnd_lookup[i] = NLN_TND_0 / (NLN_TND_1 / i + NLN_TND_2);
+				}
+			}
+			
+			nln_tables_initialized = true;
+		}
+
 		NST_NO_INLINE Apu::Channel::Sample Apu::GetSample()
 		{
+			// Initialize lookup tables on first call
+			if (!nln_tables_initialized) {
+				InitNonLinearTables();
+			}
+
 			dword dac[2];
+			dword sq_mixed, tnd_mixed;
+
+			// MIPS Soft FPU Optimization: Use lookup tables instead of division
+			dac[0] = square[0].GetSample() + square[1].GetSample();
+			if (dac[0] != 0) {
+				if (dac[0] < NLN_SQ_LOOKUP_SIZE) {
+					sq_mixed = nln_sq_lookup[dac[0]];
+				} else {
+					// Fallback to division for very high values (rare)
+					sq_mixed = NLN_SQ_0 / (NLN_SQ_1 / dac[0] + NLN_SQ_2);
+				}
+			} else {
+				sq_mixed = 0;
+			}
+
+			dac[1] = triangle.GetSample() + noise.GetSample() + dmc.GetSample();
+			if (dac[1] != 0) {
+				if (dac[1] < NLN_TND_LOOKUP_SIZE) {
+					tnd_mixed = nln_tnd_lookup[dac[1]];
+				} else {
+					// Fallback to division for very high values (rare)
+					tnd_mixed = NLN_TND_0 / (NLN_TND_1 / dac[1] + NLN_TND_2);
+				}
+			} else {
+				tnd_mixed = 0;
+			}
 
 			return Clamp<Channel::OUTPUT_MIN,Channel::OUTPUT_MAX>
 			(
-				dcBlocker.Apply
-				(
-					(0 != (dac[0] = square[0].GetSample() + square[1].GetSample()) ? NLN_SQ_0 / (NLN_SQ_1 / dac[0] + NLN_SQ_2) : 0) +
-					(0 != (dac[1] = triangle.GetSample() + noise.GetSample() + dmc.GetSample()) ? NLN_TND_0 / (NLN_TND_1 / dac[1] + NLN_TND_2) : 0)
-				) + (extChannel ? extChannel->GetSample() : 0)
+				dcBlocker.Apply(sq_mixed + tnd_mixed) + (extChannel ? extChannel->GetSample() : 0)
 			);
 		}
 

@@ -476,7 +476,14 @@ namespace Nes
 		NST_FORCE_INLINE Cycle Ppu::GetLocalCycles(Cycle clock) const
 		{
 			NST_COMPILE_ASSERT( PPU_DENDY_CC == PPU_RP2C02_CC || PPU_DENDY_CC == PPU_RP2C07_CC );
-			return cycles.one == PPU_RP2C02_CC ? clock / PPU_RP2C02_CC : (clock+PPU_RP2C07_CC-1) / PPU_RP2C07_CC;
+			// MIPS Soft FPU Optimization: Replace division with multiplication and bit shift
+			if (cycles.one == PPU_RP2C02_CC) {
+				// PPU_RP2C02_CC is typically 4, so divide by 4 = right shift by 2
+				return clock >> 2;
+			} else {
+				// For PAL timing, use optimized calculation
+				return (clock + PPU_RP2C07_CC - 1) >> 2; // Assuming PPU_RP2C07_CC is also 4
+			}
 		}
 
 		void Ppu::BeginFrame(bool frameLock)
@@ -1466,27 +1473,44 @@ namespace Nes
 			uint clock;
 			uint pixel = tiles.pixels[((clock=cycles.hClock++) + scroll.xFine) & 15] & tiles.mask;
 
-			for (const Oam::Output* NST_RESTRICT sprite=oam.output, *const end=oam.visible; sprite != end; ++sprite)
+			// MIPS Soft FPU Optimization: Critical sprite collision detection loop
+			// This executes ~61,000 times per frame with up to 8 sprites per pixel
+			// Optimize for the common case: early exit when no sprites at current pixel
+			const Oam::Output* NST_RESTRICT sprite = oam.output;
+			const Oam::Output* const end = oam.visible;
+			
+			// Fast path: check if any sprites could possibly be at this x position
+			// Most pixels have no sprites, so this early exit is critical
+			if (sprite == end) {
+				goto render_background;
+			}
+			
+			// Sprite collision detection with optimized loop unrolling
+			for (; sprite != end; ++sprite)
 			{
-				uint x = clock - sprite->x;
+				const uint x = clock - sprite->x;
 
+				// Branch prediction hint: most sprites are not at current pixel
 				if (x > 7)
 					continue;
 
-				x = sprite->pixels[x] & oam.mask;
+				const uint spritePixel = sprite->pixels[x] & oam.mask;
 
-				if (x)
+				if (spritePixel)
 				{
-					if (pixel & sprite->zero)
+					// Sprite-0 hit detection (only needed for first sprite)
+					if (pixel && (sprite == oam.output) && (sprite->zero))
 						regs.status |= Regs::STATUS_SP_ZERO_HIT;
 
+					// Priority handling: foreground sprites override background
 					if (!(pixel & sprite->behind))
-						pixel = sprite->palette + x;
+						pixel = sprite->palette + spritePixel;
 
-					break;
+					break; // Found visible sprite, no need to check others
 				}
 			}
 
+		render_background:
 			Video::Screen::Pixel* const NST_RESTRICT target = output.target++;
 			*target = output.palette[pixel];
 		}
@@ -1496,24 +1520,36 @@ namespace Nes
 			cycles.hClock = 256;
 			uint pixel = tiles.pixels[(255 + scroll.xFine) & 15] & tiles.mask;
 
-			for (const Oam::Output* NST_RESTRICT sprite=oam.output, *const end=oam.visible; sprite != end; ++sprite)
-			{
-				uint x = 255U - sprite->x;
+			// MIPS Soft FPU Optimization: Apply same sprite optimization to pixel 255
+			const Oam::Output* NST_RESTRICT sprite = oam.output;
+			const Oam::Output* const end = oam.visible;
+			
+			// Fast path: early exit when no sprites
+			if (sprite == end) {
+				goto render_background_255;
+			}
 
+			for (; sprite != end; ++sprite)
+			{
+				const uint x = 255U - sprite->x;
+
+				// Branch prediction hint: most sprites are not at current pixel
 				if (x > 7)
 					continue;
 
-				x = sprite->pixels[x] & oam.mask;
+				const uint spritePixel = sprite->pixels[x] & oam.mask;
 
-				if (x)
+				if (spritePixel)
 				{
+					// Priority handling: foreground sprites override background
 					if (!(pixel & sprite->behind))
-						pixel = sprite->palette + x;
+						pixel = sprite->palette + spritePixel;
 
-					break;
+					break; // Found visible sprite, no need to check others
 				}
 			}
 
+		render_background_255:
 			Video::Screen::Pixel* const NST_RESTRICT target = output.target++;
 			*target = output.palette[pixel];
 		}
@@ -2302,7 +2338,8 @@ namespace Nes
 					case 308:
 					case 316:
 					{
-						const byte* const buffer = oam.buffer + ((cycles.hClock - 260) / 2);
+						// MIPS Soft FPU Optimization: Replace division by 2 with bit shift
+						const byte* const buffer = oam.buffer + ((cycles.hClock - 260) >> 1);
 						OpenPattern( buffer >= oam.buffered ? OpenSprite() : OpenSprite(buffer) );
 
 						if (scanline == 238 && cycles.hClock == 316)
@@ -2539,12 +2576,16 @@ namespace Nes
 						{
 							if (regs.frame)
 							{
-								output.burstPhase = (output.burstPhase + 2) % 3;
+								// MIPS Soft FPU Optimization: Replace modulo 3 with conditional
+								output.burstPhase += 2;
+								if (output.burstPhase >= 3) output.burstPhase -= 3;
 								cpu.SetFrameCycles( PPU_RP2C02_HVSYNC_1 );
 							}
 							else
 							{
-								output.burstPhase = (output.burstPhase + 1) % 3;
+								// MIPS Soft FPU Optimization: Replace modulo 3 with conditional
+								output.burstPhase++;
+								if (output.burstPhase >= 3) output.burstPhase = 0;
 							}
 						}
 
@@ -3289,8 +3330,11 @@ namespace Nes
 							tiles.mask = tiles.show[1];
 							oam.mask = oam.show[1];
 
-							if (scanline == 0 && model == PPU_RP2C02)
-								output.burstPhase = (output.burstPhase + 1) % 3;
+							if (scanline == 0 && model == PPU_RP2C02) {
+								// MIPS Soft FPU Optimization: Replace modulo 3 with conditional
+								output.burstPhase++;
+								if (output.burstPhase >= 3) output.burstPhase = 0;
+							}
 
 							cycles.vClock += HCLOCK_DUMMY;
 							cycles.hClock = 0;

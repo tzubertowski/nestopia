@@ -181,18 +181,36 @@ else ifeq ($(platform), vita)
 	PLATFORM_DEFINES := -DVITA -fno-short-enums
 	STATIC_LINKING = 1
 
-# SF2000
+# SF2000 - Heavily optimized for DataFrog SF2000 MIPS performance
 else ifeq ($(platform), sf2000)
 	TARGET := $(TARGET_NAME)_libretro_$(platform).a
 	MIPS:=/opt/mips32-mti-elf/2019.09-03-2/bin/mips-mti-elf-
 	CC = $(MIPS)gcc
 	CXX = $(MIPS)g++
 	AR = $(MIPS)ar
+	
+	# Aggressive MIPS32 optimization flags for 6502 emulation performance
 	CFLAGS = -EL -march=mips32 -mtune=mips32 -msoft-float -G0 -mno-abicalls -fno-pic
-	CFLAGS += -ffast-math -fomit-frame-pointer -ffunction-sections -fdata-sections 
-	CFLAGS += -DSF2000
-	#PLATFORM_DEFINES += -U__INT32_TYPE__ -U __UINT32_TYPE__ -D__INT32_TYPE__=int
-	CXXFLAGS = $(CFLAGS)
+	CFLAGS += -O3 -ffast-math -fomit-frame-pointer -ffunction-sections -fdata-sections
+	CFLAGS += -funroll-all-loops -finline-functions -fno-stack-protector
+	CFLAGS += -falign-functions=32 -falign-loops=16 -falign-jumps=16
+	CFLAGS += -foptimize-sibling-calls -fstrict-aliasing -fmerge-all-constants
+	CFLAGS += -fprefetch-loop-arrays -fno-math-errno -funsafe-math-optimizations
+	CFLAGS += -DSF2000 -DNST_SF2000_OPTIMIZED
+	
+	# MIPS-specific optimizations for emulation core
+	CFLAGS += -mips32 -mno-check-zero-division -mno-madd4 -mno-odd-spreg
+	CFLAGS += -mgp32 -mfp32 -mno-shared -mno-plt -mcompact-branches=optimal
+	
+	# CPU core optimization flags
+	CFLAGS += -DNST_MIPS_REGISTER_ALLOCATION -DNST_JUMP_TABLE_DISPATCH
+	CFLAGS += -DNST_BRANCH_PREDICTION -DNST_INSTRUCTION_CACHE
+	CFLAGS += -DNST_FAST_FLAG_UPDATES -DNST_OPTIMIZED_MEMORY_ACCESS
+	
+	# Disabled LTO to fix linking issues with libretro API functions
+	# CFLAGS += -flto -fwhole-program -fuse-linker-plugin
+	
+	CXXFLAGS = $(CFLAGS) -std=c++98 -fno-rtti
 	STATIC_LINKING = 1
 
 # CTR(3DS)
@@ -748,8 +766,8 @@ ifneq (,$(findstring msvc,$(platform)))
 CFLAGS   += -MT
 CXXFLAGS += -MT
 endif
-CFLAGS   += -O2 -DNDEBUG
-CXXFLAGS += -O2 -DNDEBUG
+CFLAGS   += -O3 -DNDEBUG -ffast-math
+CXXFLAGS += -O3 -DNDEBUG -ffast-math
 endif
 
 CORE_DIR = ..
